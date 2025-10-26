@@ -1,13 +1,20 @@
 name: Kernel Build
 
 on:
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
     inputs:
       defconfig:
-        description: 'Kernel defconfig name (e.g., rmx3263_defconfig)'
+        description: "Kernel defconfig name (e.g., rmx3263_defconfig)"
         required: true
-        default: 'rmx3263_defconfig'
+        default: "rmx3263_defconfig"
+
+permissions:
+  contents: read
+  actions: write  # needed for artifact cleanup via API
+
+concurrency:
+  group: kernel-artifacts-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -17,9 +24,9 @@ jobs:
       # General Build Variables
       KERNEL_ROOT: ${{ github.workspace }}
       ARCH: arm64
-      KBUILD_BUILD_USER: '@fanuverse'
-      KBUILD_BUILD_HOST: ''
-      
+      KBUILD_BUILD_USER: "@fanuverse"
+      KBUILD_BUILD_HOST: ""
+
       # Toolchain Paths
       CLANG_BASE: ${{ github.workspace }}/toolchains/clang-r383902b
       GCC_64_BASE: ${{ github.workspace }}/toolchains/gcc-14.3
@@ -29,7 +36,7 @@ jobs:
       CC: "clang"
       CROSS_COMPILE: "${{ github.workspace }}/toolchains/gcc-14.3/bin/aarch64-none-linux-gnu-"
       CROSS_COMPILE_ARM32: "${{ github.workspace }}/toolchains/gcc-14.3/bin/arm-none-linux-gnueabihf-"
-      
+
       # UNISOC Board-Specific Properties (used by Makefiles)
       BSP_BUILD_DT_OVERLAY: "y"
       BSP_BUILD_ANDROID_OS: "y"
@@ -45,7 +52,7 @@ jobs:
       BSP_BOARD_CAMERA_MODULE_FD_VERSION: "fd2.0"
       BSP_KERNEL_VERSION: "kernel4.14"
       BSP_BOARD_CAMERA_MODULE_DVFS: "sharkl5pro"
-      
+
       # Mali Driver Specific Properties
       MALI_PLATFORM_NAME: "sharkl5Pro"
       TARGET_BOARD_PLATFORM: "sharkl5Pro"
@@ -66,87 +73,105 @@ jobs:
           echo "[INFO]: Installing system requirements..."
           sudo apt-get update
           sudo apt-get install -y --fix-missing \
-            git device-tree-compiler lz4 xz-utils zlib1g-dev zip make gcc g++ \
+            git wget bc device-tree-compiler lz4 xz-utils zlib1g-dev zip make gcc g++ \
             python3 python-is-python3 libncurses-dev flex bison gperf libssl-dev \
-            libelf-dev kmod pahole zstd libyaml-dev
+            libelf-dev kmod pahole zstd libyaml-dev jq
+
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/toolchains/clang-r383902b
+            ${{ github.workspace }}/toolchains/gcc-14.3
+          key: ${{ runner.os }}-tc-a11-r383902b-gcc143
 
       - name: Download and Set up Toolchains
         run: |
           echo "[INFO] Setting up Toolchains..."
           cd "${{ github.workspace }}/toolchains"
-          
-          echo "--> Downloading Clang..."
-          mkdir -p clang-r383902b
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/0e9e7035bf8ad42437c6156e5950eab13655b26c/clang-r383902b.tar.gz -O clang.tar.gz
-          tar -xf clang.tar.gz -C clang-r383902b && rm clang.tar.gz
-          
-          echo "--> Downloading GCC 14.3 (64-bit and 32-bit)..."
-          mkdir -p gcc-14.3
-          # Download 64-bit (aarch64)
-          wget -q https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz -O gcc64.tar.xz
-          # Download 32-bit (arm)
-          wget -q https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-linux-gnueabihf.tar.xz -O gcc32.tar.xz
-          
-          echo "--> Extracting GCC..."
-          tar -xf gcc64.tar.xz -C gcc-14.3 --strip-components=1
-          tar -xf gcc32.tar.xz -C gcc-14.3 --strip-components=1
-          rm gcc64.tar.xz gcc32.tar.xz
+
+          # ---- Clang (Android R) ----
+          if [ ! -x "clang-r383902b/bin/clang" ]; then
+            echo "--> Downloading Clang r383902b..."
+            mkdir -p clang-r383902b
+            wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/0e9e7035bf8ad42437c6156e5950eab13655b26c/clang-r383902b.tar.gz -O clang.tar.gz
+            tar -xf clang.tar.gz -C clang-r383902b && rm clang.tar.gz
+          else
+            echo "--> Clang already present (cache)."
+          fi
+
+          # ---- GCC (AArch64 + ARMhf) ----
+          if [ ! -x "gcc-14.3/bin/aarch64-none-linux-gnu-gcc" ] || [ ! -x "gcc-14.3/bin/arm-none-linux-gnueabihf-gcc" ]; then
+            echo "--> Downloading GCC 14.3 (64-bit and 32-bit)..."
+            mkdir -p gcc-14.3
+            wget -q https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz -O gcc64.tar.xz
+            wget -q https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-linux-gnueabihf.tar.xz -O gcc32.tar.xz
+            echo "--> Extracting GCC..."
+            tar -xf gcc64.tar.xz -C gcc-14.3 --strip-components=1
+            tar -xf gcc32.tar.xz -C gcc-14.3 --strip-components=1
+            rm -f gcc64.tar.xz gcc32.tar.xz
+          else
+            echo "--> GCC toolchains already present (cache)."
+          fi
 
           echo "--> Setting permissions..."
-          chmod +x ${{ env.CLANG_BASE }}/bin/*
-          chmod +x ${{ env.GCC_64_BASE }}/bin/*
+          chmod +x ${{ env.CLANG_BASE }}/bin/* || true
+          chmod +x ${{ env.GCC_64_BASE }}/bin/* || true
 
       - name: Set up PATH
         run: |
           echo "${{ env.CLANG_BASE }}/bin" >> $GITHUB_PATH
           echo "${{ env.GCC_64_BASE }}/bin" >> $GITHUB_PATH
+          echo "${{ env.GCC_32_BASE }}/bin" >> $GITHUB_PATH
 
       - name: Build Kernel, Modules, and DTBs
         run: |
           echo -e "\n[INFO]: KERNEL BUILD STARTED..!\n"
-          
-          make -C "${{ github.workspace }}" O="${{ github.workspace }}/out" ARCH=${{ env.ARCH }} ${{ inputs.defconfig }} || exit 1
-            
+
+          # Configure
+          make -C "${{ github.workspace }}" O="${{ github.workspace }}/out" ARCH=${{ env.ARCH }} "${{ inputs.defconfig }}" || exit 1
+
+          # Build kernel image, in-tree modules, DTBs
           make -C "${{ github.workspace }}" \
             O="${{ github.workspace }}/out" \
-            -j$(nproc) \
-            LLVM=1 \
-            LLVM_IAS=1 \
+            -j"$(nproc)" \
+            LLVM=1 LLVM_IAS=1 \
             ARCH="${{ env.ARCH }}" \
             CC="${{ env.CC }}" \
-            LD="ld.lld" \
-            AR="llvm-ar" \
-            NM="llvm-nm" \
-            OBJCOPY="llvm-objcopy" \
-            OBJDUMP="llvm-objdump" \
-            STRIP="llvm-strip" \
+            LD="ld.lld" AR="llvm-ar" NM="llvm-nm" \
+            OBJCOPY="llvm-objcopy" OBJDUMP="llvm-objdump" STRIP="llvm-strip" \
             CROSS_COMPILE="${{ env.CROSS_COMPILE }}" \
             CROSS_COMPILE_ARM32="${{ env.CROSS_COMPILE_ARM32 }}" \
             CLANG_TRIPLE="aarch64-none-linux-gnu-" \
             Image modules dtbs || exit 1
+
+          # Prepare headers for external modules
+          make -C "${{ github.workspace }}" \
+            O="${{ github.workspace }}/out" \
+            LLVM=1 LLVM_IAS=1 ARCH="${{ env.ARCH }}" modules_prepare
 
           echo -e "\n[INFO]: KERNEL BUILD FINISHED..!"
 
       - name: Install In-Tree Kernel Modules
         run: |
           echo "[INFO]: Installing in-tree kernel modules..."
-          make -C "${{ github.workspace }}/out" \
-            LLVM=1 \
-            ARCH="${{ env.ARCH }}" \
-            CC="${{ env.CC }}" \
-            LD="ld.lld" \
+          make -C "${{ github.workspace }}" O="${{ github.workspace }}/out" \
+            -j"$(nproc)" \
+            LLVM=1 ARCH="${{ env.ARCH }}" CC="${{ env.CC }}" LD="ld.lld" \
             CROSS_COMPILE="${{ env.CROSS_COMPILE }}" \
             CLANG_TRIPLE="aarch64-none-linux-gnu-" \
             INSTALL_MOD_PATH="${{ github.workspace }}/modules_out" \
+            INSTALL_MOD_STRIP=1 \
             modules_install || exit 1
-          
+
       - name: Build Out-of-Tree Modules
         run: |
           echo "[INFO]: Building all out-of-tree modules..."
-          
+
           export BSP_KERNEL_PATH="${{ github.workspace }}/out"
           export BSP_MODULES_OUT="${{ github.workspace }}/out"
-          
+          export KBUILD_EXTRA_SYMBOLS="${{ github.workspace }}/out/Module.symvers"
+
           MODULE_LIST="
           sprd_flash_drv:drivers/modules/common/camera/flash/flash_drv:NONE
           sprd_sensor:drivers/modules/common/camera/sensor:NONE
@@ -168,57 +193,61 @@ jobs:
           sprd_fm:drivers/modules/kernel4.14/wcn/fm/driver:NONE
           sprdwl_ng:drivers/modules/kernel4.14/wcn/wlan:NONE
           "
-          export KBUILD_EXTRA_SYMBOLS=""
 
-          for module_info in $MODULE_LIST; do
-            KO_NAME=$(echo "$module_info" | cut -d':' -f1)
-            DRIVER_PATH="${{ github.workspace }}/$(echo "$module_info" | cut -d':' -f2)"
-            EXTRA_ARGS=$(echo "$module_info" | cut -d':' -f3)
+          for pass in 1 2; do
+            echo "[INFO]: OOT build pass $pass"
+            for module_info in $MODULE_LIST; do
+              KO_NAME=$(echo "$module_info" | cut -d':' -f1)
+              DRIVER_PATH="${{ github.workspace }}/$(echo "$module_info" | cut -d':' -f2)"
+              EXTRA_ARGS=$(echo "$module_info" | cut -d':' -f3)
 
-            if [ -f "$DRIVER_PATH/Makefile" ]; then
-              echo "--> Building $KO_NAME..."
-              
-              MAKE_CMD="make -C \"$DRIVER_PATH\" \
-                LLVM=1 LLVM_IAS=1 ARCH=\"${{ env.ARCH }}\" CC=\"${{ env.CC }}\" LD=\"ld.lld\" AR=\"llvm-ar\" NM=\"llvm-nm\" \
-                OBJCOPY=\"llvm-objcopy\" OBJDUMP=\"llvm-objdump\" STRIP=\"llvm-strip\" \
-                CROSS_COMPILE=\"${{ env.CROSS_COMPILE }}\" CROSS_COMPILE_ARM32=\"${{ env.CROSS_COMPILE_ARM32 }}\" \
-                CLANG_TRIPLE=\"aarch64-none-linux-gnu-\" \
-                BSP_BUILD_ANDROID_OS=\"${{ env.BSP_BUILD_ANDROID_OS }}\" BSP_BUILD_FAMILY=\"${{ env.BSP_BUILD_FAMILY }}\" \
-                BSP_BUILD_DT_OVERLAY=\"${{ env.BSP_BUILD_DT_OVERLAY }}\" BSP_BOARD_CAMERA_MODULE_CPP_VERSION=\"${{ env.BSP_BOARD_CAMERA_MODULE_CPP_VERSION }}\" \
-                BSP_BOARD_CAMERA_MODULE_FD_VERSION=\"${{ env.BSP_BOARD_CAMERA_MODULE_FD_VERSION }}\" BSP_KERNEL_VERSION=\"${{ env.BSP_KERNEL_VERSION }}\" \
-                BSP_BOARD_CAMERA_MODULE_VDSP_DEVICE=\"${{ env.BSP_BOARD_CAMERA_MODULE_VDSP_DEVICE }}\" BSP_BOARD_UNISOC_WCN_SOCKET=\"${{ env.BSP_BOARD_UNISOC_WCN_SOCKET }}\" \
-                BSP_BOARD_WLAN_DEVICE=\"${{ env.BSP_BOARD_WLAN_DEVICE }}\" BSP_BOARD_CAMERA_MODULE_DVFS=\"${{ env.BSP_BOARD_CAMERA_MODULE_DVFS }}\" \
-                modules"
-              
-              if [ "$KO_NAME" = "mali_gondul" ]; then
-                MAKE_CMD="$MAKE_CMD MALI_PLATFORM_NAME=\"${{ env.MALI_PLATFORM_NAME }}\" TARGET_BOARD_PLATFORM=\"${{ env.TARGET_BOARD_PLATFORM }}\" TARGET_BOARD=\"${{ env.TARGET_BOARD }}\""
-              fi
+              if [ -f "$DRIVER_PATH/Makefile" ]; then
+                echo "--> Building $KO_NAME..."
+                MAKE_CMD="make -j$(nproc) -C \"$DRIVER_PATH\" \
+                  LLVM=1 LLVM_IAS=1 ARCH=\"${{ env.ARCH }}\" CC=\"${{ env.CC }}\" LD=\"ld.lld\" \
+                  AR=\"llvm-ar\" NM=\"llvm-nm\" OBJCOPY=\"llvm-objcopy\" OBJDUMP=\"llvm-objdump\" STRIP=\"llvm-strip\" \
+                  CROSS_COMPILE=\"${{ env.CROSS_COMPILE }}\" CROSS_COMPILE_ARM32=\"${{ env.CROSS_COMPILE_ARM32 }}\" \
+                  CLANG_TRIPLE=\"aarch64-none-linux-gnu-\" \
+                  KBUILD_EXTRA_SYMBOLS=\"$KBUILD_EXTRA_SYMBOLS\" \
+                  BSP_BUILD_ANDROID_OS=\"${{ env.BSP_BUILD_ANDROID_OS }}\" BSP_BUILD_FAMILY=\"${{ env.BSP_BUILD_FAMILY }}\" \
+                  BSP_BUILD_DT_OVERLAY=\"${{ env.BSP_BUILD_DT_OVERLAY }}\" \
+                  BSP_BOARD_CAMERA_MODULE_CPP_VERSION=\"${{ env.BSP_BOARD_CAMERA_MODULE_CPP_VERSION }}\" \
+                  BSP_BOARD_CAMERA_MODULE_FD_VERSION=\"${{ env.BSP_BOARD_CAMERA_MODULE_FD_VERSION }}\" \
+                  BSP_KERNEL_VERSION=\"${{ env.BSP_KERNEL_VERSION }}\" \
+                  BSP_BOARD_CAMERA_MODULE_VDSP_DEVICE=\"${{ env.BSP_BOARD_CAMERA_MODULE_VDSP_DEVICE }}\" \
+                  BSP_BOARD_UNISOC_WCN_SOCKET=\"${{ env.BSP_BOARD_UNISOC_WCN_SOCKET }}\" \
+                  BSP_BOARD_WLAN_DEVICE=\"${{ env.BSP_BOARD_WLAN_DEVICE }}\" \
+                  BSP_BOARD_CAMERA_MODULE_DVFS=\"${{ env.BSP_BOARD_CAMERA_MODULE_DVFS }}\" \
+                  modules"
 
-              if [ -n "$KBUILD_EXTRA_SYMBOLS" ]; then
-                MAKE_CMD="$MAKE_CMD KBUILD_EXTRA_SYMBOLS=\"$KBUILD_EXTRA_SYMBOLS\""
-              fi
+                # Mali platform variables only for GPU module
+                if [ "$KO_NAME" = "mali_gondul" ]; then
+                  MAKE_CMD="$MAKE_CMD MALI_PLATFORM_NAME=\"${{ env.MALI_PLATFORM_NAME }}\" TARGET_BOARD_PLATFORM=\"${{ env.TARGET_BOARD_PLATFORM }}\" TARGET_BOARD=\"${{ env.TARGET_BOARD }}\""
+                fi
 
-              if [ "$EXTRA_ARGS" != "NONE" ]; then
-                MAKE_CMD="$MAKE_CMD $EXTRA_ARGS"
+                # Any extra args
+                if [ "$EXTRA_ARGS" != "NONE" ]; then
+                  MAKE_CMD="$MAKE_CMD $EXTRA_ARGS"
+                fi
+
+                eval $MAKE_CMD
+
+                # Accumulate symvers for cross-module deps
+                if [ -f "$BSP_MODULES_OUT/$KO_NAME/Module.symvers" ]; then
+                  KBUILD_EXTRA_SYMBOLS="$KBUILD_EXTRA_SYMBOLS $BSP_MODULES_OUT/$KO_NAME/Module.symvers"
+                fi
+              else
+                echo "--> Makefile not found for $KO_NAME at $DRIVER_PATH, skipping."
               fi
-              
-              eval $MAKE_CMD
-              
-              if [ -f "$BSP_MODULES_OUT/$KO_NAME/Module.symvers" ]; then
-                KBUILD_EXTRA_SYMBOLS="$KBUILD_EXTRA_SYMBOLS $BSP_MODULES_OUT/$KO_NAME/Module.symvers"
-              fi
-            else
-              echo "--> Makefile not found for $KO_NAME at $DRIVER_PATH, skipping."
-            fi
+            done
           done
 
       - name: Install Out-of-Tree Modules and Generate Dependencies
         run: |
           echo "[INFO]: Installing all out-of-tree modules..."
-          
-          export BSP_KERNEL_PATH="${{ github.workspace }}/out"
+
           export BSP_MODULES_OUT="${{ github.workspace }}/out"
-          
+
           MODULE_LIST="
           sprd_flash_drv:drivers/modules/common/camera/flash/flash_drv
           sprd_sensor:drivers/modules/common/camera/sensor
@@ -240,75 +269,130 @@ jobs:
           sprd_fm:drivers/modules/kernel4.14/wcn/fm/driver
           sprdwl_ng:drivers/modules/kernel4.14/wcn/wlan
           "
+
           for module_info in $MODULE_LIST; do
             KO_NAME=$(echo "$module_info" | cut -d':' -f1)
             DRIVER_PATH="${{ github.workspace }}/$(echo "$module_info" | cut -d':' -f2)"
             if [ -d "$BSP_MODULES_OUT/$KO_NAME" ]; then
-              make -C "${{ github.workspace }}/out" M="$BSP_MODULES_OUT/$KO_NAME" \
-                LLVM=1 \
-                ARCH="${{ env.ARCH }}" \
-                CC="${{ env.CC }}" \
-                LD="ld.lld" \
-                CROSS_COMPILE="${{ env.CROSS_COMPILE }}" \
-                CLANG_TRIPLE="aarch64-none-linux-gnu-" \
+              make -C "${{ github.workspace }}" O="${{ github.workspace }}/out" \
+                M="$BSP_MODULES_OUT/$KO_NAME" \
+                -j"$(nproc)" \
+                LLVM=1 ARCH="${{ env.ARCH }}" CC="${{ env.CC }}" LD="ld.lld" \
+                CROSS_COMPILE="${{ env.CROSS_COMPILE }}" CLANG_TRIPLE="aarch64-none-linux-gnu-" \
                 INSTALL_MOD_PATH="${{ github.workspace }}/modules_out" \
+                INSTALL_MOD_STRIP=1 \
                 modules_install
               echo "--> $KO_NAME driver installed."
+            else
+              echo "--> Build output not found for $KO_NAME, skipping install."
             fi
           done
 
           echo "[INFO]: Generating final module dependency files..."
-          KERNEL_VERSION=$(cat ${{ github.workspace }}/out/include/generated/utsrelease.h | awk '{print $3}' | tr -d '"')
-          touch "${{ github.workspace }}/modules_out/lib/modules/$KERNEL_VERSION/modules.builtin.modinfo"
+          KERNEL_VERSION=$(awk '{print $3}' "${{ github.workspace }}/out/include/generated/utsrelease.h" | tr -d '"')
+          mkdir -p "${{ github.workspace }}/modules_out/lib/modules/$KERNEL_VERSION"
+          : > "${{ github.workspace }}/modules_out/lib/modules/$KERNEL_VERSION/modules.builtin.modinfo"
           depmod -a -b "${{ github.workspace }}/modules_out" "$KERNEL_VERSION"
 
       - name: Package DTB and DTBO files
         run: |
           echo "[INFO]: Packaging DTB and DTBO files..."
           mkdir -p "${{ github.workspace }}/build/dtb"
-          
-          # The standard location for UNISOC DTBs is arch/arm64/boot/dts/sprd
+
           DTB_SOURCE_DIR="${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts/sprd"
           DTB_DEST_DIR="${{ github.workspace }}/build/dtb"
-          
+
           if [ -d "$DTB_SOURCE_DIR" ]; then
               echo "--> Found DTB directory at $DTB_SOURCE_DIR"
-              find "$DTB_SOURCE_DIR" -name "*.dtb" -exec cp {} "$DTB_DEST_DIR/" \;
+              find "$DTB_SOURCE_DIR" -name "*.dtb"  -exec cp {} "$DTB_DEST_DIR/" \;
               find "$DTB_SOURCE_DIR" -name "*.dtbo" -exec cp {} "$DTB_DEST_DIR/" \;
           else
               echo "::warning:: Standard UNISOC DTB directory not found. Searching all of boot/dts..."
-              find "${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts" -name "*.dtb" -exec cp {} "$DTB_DEST_DIR/" \;
+              find "${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts" -name "*.dtb"  -exec cp {} "$DTB_DEST_DIR/" \;
               find "${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts" -name "*.dtbo" -exec cp {} "$DTB_DEST_DIR/" \;
           fi
 
-          if [ -z "$(ls -A $DTB_DEST_DIR)" ]; then
+          if [ -z "$(ls -A "$DTB_DEST_DIR")" ]; then
               echo "::error::No DTB or DTBO files were found after the build. Check the build logs."
               exit 1
           else
               echo "--> DTB/DTBO files successfully packaged."
-              ls -lR $DTB_DEST_DIR
+              ls -lR "$DTB_DEST_DIR"
           fi
 
-      - name: Package Kernel and All Modules
+      - name: Package Kernel Image (Image or Image.gz)
         run: |
-          echo "[INFO]: Packaging kernel and module artifacts..."
-          cp "${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/Image" "${{ github.workspace }}/build/Image"
-          
+          echo "[INFO]: Packaging kernel image..."
+          IMGDIR="${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot"
+          mkdir -p "${{ github.workspace }}/build"
+          if [ -f "$IMGDIR/Image.gz" ]; then
+            cp "$IMGDIR/Image.gz" "${{ github.workspace }}/build/Image.gz"
+          elif [ -f "$IMGDIR/Image" ]; then
+            cp "$IMGDIR/Image" "${{ github.workspace }}/build/Image"
+          else
+            echo "::error::No kernel Image/Image.gz found"; exit 1
+          fi
+
+      - name: Package Modules (zip)
+        run: |
+          echo "[INFO]: Packaging kernel modules..."
           cd "${{ github.workspace }}/modules_out"
-          
+
           echo "[INFO]: Removing 'source' and 'build' symlinks to prevent zip recursion..."
           find . -type l -name "source" -delete
           find . -type l -name "build" -delete
-          
+
           echo "[INFO]: Zipping all modules..."
           zip -r9 "${{ github.workspace }}/build/modules-${{ github.run_id }}.zip" .
-          
+
           echo "Kernel Image, Modules ZIP, and DTBs are ready in the 'build' directory."
-          ls -lR ${{ github.workspace }}/build
+          ls -lR "${{ github.workspace }}/build"
+
+      - name: Cleanup old artifacts (free space before upload)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function listAllArtifacts() {
+              let page = 1;
+              const per_page = 100;
+              let all = [];
+              while (true) {
+                const { data } = await github.rest.actions.listArtifactsForRepo({ owner, repo, per_page, page });
+                all = all.concat(data.artifacts || []);
+                if (!data.artifacts || data.artifacts.length < per_page) break;
+                page++;
+              }
+              return all;
+            }
+
+            const artifacts = await listAllArtifacts();
+
+            // Delete any existing "latest-kernel-sharkl5Pro" to guarantee space for overwrite.
+            const latest = artifacts.filter(a => a.name === "latest-kernel-sharkl5Pro" && !a.expired);
+            for (const a of latest) {
+              core.info(`Deleting existing latest artifact id=${a.id}, created_at=${a.created_at}`);
+              await github.rest.actions.deleteArtifact({ owner, repo, artifact_id: a.id });
+            }
+
+            // Prune legacy per-run artifacts "kernel-build-*" (keep newest 3)
+            let legacy = artifacts.filter(a => /^kernel-build-/.test(a.name) && !a.expired);
+            legacy.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+            const toDelete = legacy.slice(3); // keep last 3
+            for (const a of toDelete) {
+              core.info(`Deleting legacy artifact ${a.name} id=${a.id}, created_at=${a.created_at}`);
+              await github.rest.actions.deleteArtifact({ owner, repo, artifact_id: a.id });
+            }
 
       - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-${{ github.run_id }}
+          name: latest-kernel-sharkl5Pro
           path: ${{ github.workspace }}/build/*
-          retention-days: 7
+          retention-days: 3
+          compression-level: 6
+          overwrite: true
+          include-hidden-files: false
+          if-no-files-found: error
