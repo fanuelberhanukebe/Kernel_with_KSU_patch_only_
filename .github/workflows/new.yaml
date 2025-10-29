@@ -390,6 +390,17 @@ jobs:
           ./repackimg.sh --local
           # image-new.img is created by AIK
 
+          # ---
+          # NEW CHECK: Make sure image-new.img exists and is > 20MB
+          # ---
+          echo "--> Checking repacked image..."
+          if [ ! -f "image-new.img" ] || [ $(stat -c%s "image-new.img") -lt 20000000 ]; then
+            echo "::error:: Repacked image-new.img is missing or too small!"
+            ls -l
+            exit 1
+          fi
+          echo "--> Repacked image is valid."
+          
           echo "[INFO]: Signing boot images (dual rollback index)..."
           
           export KEY_FILE="${{ github.workspace }}/testkey.pem"
@@ -484,7 +495,12 @@ jobs:
       # -----------------------------------------------------------------
       # FINAL UPLOAD STEP
       # -----------------------------------------------------------------
-      
+
+      - name: Check Final Image Sizes
+        run: |
+          echo "Contents of final_images directory:"
+          ls -lR ${{ github.workspace }}/final_images/
+          
       - name: Upload Final Images to Telegram
         if: success() # Only run if the build was successful
         uses: appleboy/telegram-action@master
