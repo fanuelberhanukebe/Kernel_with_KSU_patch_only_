@@ -509,7 +509,8 @@ jobs:
           sudo umount "$MOUNT_POINT" || { echo "::error:: Failed to unmount socko.img"; exit 1; }
           
           echo "--> Running e2fsck and resize2fs..."
-          sudo e2fsck -f "$SOCKO_IMG_PATH" || echo "e2fsck found and fixed errors."
+          sudo e2fsck -f -y "$SOCKO_IMG_PATH" || echo "e2fsck found and fixed errors."
+          sudo e2fsck -f -y "$SOCKO_IMG_PATH" || echo "e2fsck found and fixed errors."
           sudo resize2fs -M "$SOCKO_IMG_PATH"
           
           echo "--> socko.img processed successfully."
