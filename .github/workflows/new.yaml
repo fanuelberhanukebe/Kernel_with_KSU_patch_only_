@@ -477,6 +477,7 @@ jobs:
           
           echo "--> Running e2fsck and resize2fs..."
           sudo e2fsck -f "$SOCKO_IMG_PATH" || echo "e2fsck found and fixed errors."
+          e2fsck -f "$SOCKO_IMG_PATH"
           sudo resize2fs -M "$SOCKO_IMG_PATH"
           
           echo "--> socko.img processed successfully."
