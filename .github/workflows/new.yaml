@@ -76,7 +76,7 @@ jobs:
             git wget bc device-tree-compiler lz4 xz-utils zlib1g-dev zip make gcc g++ \
             python3 python-is-python3 libncurses-dev flex bison gperf libssl-dev \
             libelf-dev kmod pahole zstd libyaml-dev jq \
-            e2fsprogs # Removed pip
+            e2fsprogs # Removed pip and avb dependencies
 
       - name: Cache toolchains
         uses: actions/cache@v4
@@ -90,8 +90,6 @@ jobs:
         run: |
           echo "[INFO] Setting up Toolchains..."
           cd "${{ github.workspace }}/toolchains"
-
-          # ---- Clang (Android R) ----
           if [ ! -x "clang-r383902b/bin/clang" ]; then
             echo "--> Downloading Clang r383902b..."
             mkdir -p clang-r383902b
@@ -100,8 +98,6 @@ jobs:
           else
             echo "--> Clang already present (cache)."
           fi
-
-          # ---- GCC (AArch64 + ARMhf) ----
           if [ ! -x "gcc-14.3/bin/aarch64-none-linux-gnu-gcc" ] || [ ! -x "gcc-14.3/bin/arm-none-linux-gnueabihf-gcc" ]; then
             echo "--> Downloading GCC 14.3 (64-bit and 32-bit)..."
             mkdir -p gcc-14.3
@@ -114,7 +110,6 @@ jobs:
           else
             echo "--> GCC toolchains already present (cache)."
           fi
-
           echo "--> Setting permissions..."
           chmod +x ${{ env.CLANG_BASE }}/bin/* || true
           chmod +x ${{ env.GCC_64_BASE }}/bin/* || true
@@ -124,17 +119,13 @@ jobs:
           echo "${{ env.CLANG_BASE }}/bin" >> $GITHUB_PATH
           echo "${{ env.GCC_64_BASE }}/bin" >> $GITHUB_PATH
           echo "${{ env.GCC_32_BASE }}/bin" >> $GITHUB_PATH
-          echo "${{ github.workspace }}/AIK/bin/arm64" >> $GITHUB_PATH # Add AIK binaries to PATH
+          echo "${{ github.workspace }}/AIK/bin/arm64" >> $GITHUB_PATH
           echo "${{ github.workspace }}/AIK/bin/x86_64" >> $GITHUB_PATH
 
       - name: Build Kernel, Modules, and DTBs
         run: |
           echo -e "\n[INFO]: KERNEL BUILD STARTED..!\n"
-
-          # Configure
           make -C "${{ github.workspace }}" O="${{ github.workspace }}/out" ARCH=${{ env.ARCH }} "${{ inputs.defconfig }}" || exit 1
-
-          # Build kernel image, in-tree modules, DTBs
           make -C "${{ github.workspace }}" \
             O="${{ github.workspace }}/out" \
             -j"$(nproc)" \
@@ -147,12 +138,9 @@ jobs:
             CROSS_COMPILE_ARM32="${{ env.CROSS_COMPILE_ARM32 }}" \
             CLANG_TRIPLE="aarch64-none-linux-gnu-" \
             Image modules dtbs || exit 1
-
-          # Prepare headers for external modules
           make -C "${{ github.workspace }}" \
             O="${{ github.workspace }}/out" \
             LLVM=1 LLVM_IAS=1 ARCH="${{ env.ARCH }}" modules_prepare
-
           echo -e "\n[INFO]: KERNEL BUILD FINISHED..!"
 
       - name: Install In-Tree Kernel Modules
@@ -170,11 +158,9 @@ jobs:
       - name: Build Out-of-Tree Modules
         run: |
           echo "[INFO]: Building all out-of-tree modules..."
-
           export BSP_KERNEL_PATH="${{ github.workspace }}/out"
           export BSP_MODULES_OUT="${{ github.workspace }}/out"
           export KBUILD_EXTRA_SYMBOLS="${{ github.workspace }}/out/Module.symvers"
-
           MODULE_LIST="
           sprd_flash_drv:drivers/modules/common/camera/flash/flash_drv:NONE
           sprd_sensor:drivers/modules/common/camera/sensor:NONE
@@ -196,14 +182,12 @@ jobs:
           sprd_fm:drivers/modules/kernel4.14/wcn/fm/driver:NONE
           sprdwl_ng:drivers/modules/kernel4.14/wcn/wlan:NONE
           "
-
           for pass in 1 2; do
             echo "[INFO]: OOT build pass $pass"
             for module_info in $MODULE_LIST; do
               KO_NAME=$(echo "$module_info" | cut -d':' -f1)
               DRIVER_PATH="${{ github.workspace }}/$(echo "$module_info" | cut -d':' -f2)"
               EXTRA_ARGS=$(echo "$module_info" | cut -d':' -f3)
-
               if [ -f "$DRIVER_PATH/Makefile" ]; then
                 echo "--> Building $KO_NAME..."
                 MAKE_CMD="make -j$(nproc) -C \"$DRIVER_PATH\" \
@@ -222,20 +206,13 @@ jobs:
                   BSP_BOARD_WLAN_DEVICE=\"${{ env.BSP_BOARD_WLAN_DEVICE }}\" \
                   BSP_BOARD_CAMERA_MODULE_DVFS=\"${{ env.BSP_BOARD_CAMERA_MODULE_DVFS }}\" \
                   modules"
-
-                # Mali platform variables only for GPU module
                 if [ "$KO_NAME" = "mali_gondul" ]; then
                   MAKE_CMD="$MAKE_CMD MALI_PLATFORM_NAME=\"${{ env.MALI_PLATFORM_NAME }}\" TARGET_BOARD_PLATFORM=\"${{ env.TARGET_BOARD_PLATFORM }}\" TARGET_BOARD=\"${{ env.TARGET_BOARD }}\""
                 fi
-
-                # Any extra args
                 if [ "$EXTRA_ARGS" != "NONE" ]; then
                   MAKE_CMD="$MAKE_CMD $EXTRA_ARGS"
                 fi
-
                 eval $MAKE_CMD
-
-                # Accumulate symvers for cross-module deps
                 if [ -f "$BSP_MODULES_OUT/$KO_NAME/Module.symvers" ]; then
                   KBUILD_EXTRA_SYMBOLS="$KBUILD_EXTRA_SYMBOLS $BSP_MODULES_OUT/$KO_NAME/Module.symvers"
                 fi
@@ -248,9 +225,7 @@ jobs:
       - name: Install Out-of-Tree Modules and Generate Dependencies
         run: |
           echo "[INFO]: Installing all out-of-tree modules..."
-
           export BSP_MODULES_OUT="${{ github.workspace }}/out"
-
           MODULE_LIST="
           sprd_flash_drv:drivers/modules/common/camera/flash/flash_drv
           sprd_sensor:drivers/modules/common/camera/sensor
@@ -272,7 +247,6 @@ jobs:
           sprd_fm:drivers/modules/kernel4.14/wcn/fm/driver
           sprdwl_ng:drivers/modules/kernel4.14/wcn/wlan
           "
-
           for module_info in $MODULE_LIST; do
             KO_NAME=$(echo "$module_info" | cut -d':' -f1)
             DRIVER_PATH="${{ github.workspace }}/$(echo "$module_info" | cut -d':' -f2)"
@@ -290,7 +264,6 @@ jobs:
               echo "--> Build output not found for $KO_NAME, skipping install."
             fi
           done
-
           echo "[INFO]: Generating final module dependency files..."
           export KERNEL_VERSION=$(awk '{print $3}' "${{ github.workspace }}/out/include/generated/utsrelease.h" | tr -d '"')
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
@@ -302,10 +275,8 @@ jobs:
         run: |
           echo "[INFO]: Packaging DTB and DTBO files..."
           mkdir -p "${{ github.workspace }}/build/dtb"
-
           DTB_SOURCE_DIR="${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts/sprd"
           DTB_DEST_DIR="${{ github.workspace }}/build/dtb"
-
           if [ -d "$DTB_SOURCE_DIR" ]; then
               echo "--> Found DTB directory at $DTB_SOURCE_DIR"
               find "$DTB_SOURCE_DIR" -name "*.dtb"  -exec cp {} "$DTB_DEST_DIR/" \;
@@ -315,7 +286,6 @@ jobs:
               find "${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts" -name "*.dtb"  -exec cp {} "$DTB_DEST_DIR/" \;
               find "${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot/dts" -name "*.dtbo" -exec cp {} "$DTB_DEST_DIR/" \;
           fi
-
           if [ -z "$(ls -A "$DTB_DEST_DIR")" ]; then
               echo "::error::No DTB or DTBO files were found after the build. Check the build logs."
               exit 1
@@ -339,10 +309,6 @@ jobs:
             echo "::error::No kernel Image/Image.gz found"; exit 1
           fi
 
-      # -----------------------------------------------------------------
-      # NEW AUTOMATION STEPS START HERE
-      # -----------------------------------------------------------------
-
       - name: Set AIK Permissions
         run: |
           echo "[INFO]: Setting permissions for local AIK..."
@@ -353,20 +319,20 @@ jobs:
           chmod +x "${{ github.workspace }}/AIK/cleanup.sh"
           chmod +x "${{ github.workspace }}/AIK/repackimg.sh"
           chmod +x "${{ github.workspace }}/AIK/unpackimg.sh"
-          # Make all binaries in all architecture sub-bins executable
           chmod +x "${{ github.workspace }}/AIK/bin/"*/* || echo "No binaries found in AIK/bin, continuing."
 
-      - name: Clone avb (avbtool)
-        run: |
-          echo "[INFO]: Cloning avb..."
-          git clone --depth=1 https://android.googlesource.com/platform/external/avb "${{ github.workspace }}/avb"
+      # ---
+      # STEP REMOVED: "Clone avb (avbtool)"
+      # ---
 
-      - name: Process and Sign boot.img
+      # ---
+      # STEP MODIFIED: Renamed and removed all signing logic
+      # ---
+      - name: Process boot.img (Unsigned)
         run: |
           echo "[INFO]: Processing boot.img..."
           cd "${{ github.workspace }}/AIK"
 
-          # Unpack stock boot.img
           if [ ! -f "${{ github.workspace }}/boot.img" ]; then
             echo "::error::Stock boot.img not found at repository root!"
             exit 1
@@ -388,58 +354,17 @@ jobs:
 
           echo "--> Repacking boot.img..."
           ./repackimg.sh --local
-          # image-new.img is created by AIK
 
-          # ---
-          # NEW CHECK: Make sure image-new.img exists and is > 20MB
-          # ---
-          echo "--> Checking repacked image..."
-          if [ ! -f "image-new.img" ] || [ $(stat -c%s "image-new.img") -lt 20000000 ]; then
-            echo "::error:: Repacked image-new.img is missing or too small!"
-            ls -l
-            exit 1
-          fi
-          echo "--> Repacked image is valid."
-          
-          echo "[INFO]: Signing boot images (dual rollback index)..."
-          
-          export KEY_FILE="${{ github.workspace }}/testkey.pem"
-          if [ ! -f "$KEY_FILE" ]; then
-            echo "::error:: testkey.pem not found at repository root!"
-            exit 1
-          fi
+          echo "--> Moving repacked boot.img to final_images..."
+          # Move the unsigned image-new.img to the final destination
+          mv "image-new.img" "${{ github.workspace }}/final_images/boot.img"
 
-          # ---
-          # SIGNING COMMAND 1: (boot.img)
-          # ---
-          echo "--> Signing boot.img (rollback_index 5)..."
-          python3 "${{ github.workspace }}/avb/avbtool.py" add_hash_footer \
-            --image image-new.img \
-            --output "${{ github.workspace }}/final_images/boot.img" \
-            --partition_name boot \
-            --partition_size 67108864 \
-            --rollback_index 5 \
-            --rollback_index_location 0 \
-            --algorithm SHA256_RSA4096 \
-            --key "$KEY_FILE"
-
-          # ---
-          # SIGNING COMMAND 2: (boot-git.img)
-          # ---
-          echo "--> Signing boot-git.img (rollback_index 1612483200)..."
-          python3 "${{ github.workspace }}/avb/avbtool.py" add_hash_footer \
-            --image image-new.img \
-            --output "${{ github.workspace }}/final_images/boot-git.img" \
-            --partition_name boot \
-            --partition_size 67108864 \
-            --rollback_index 1612483200 \
-            --rollback_index_location 0 \
-            --algorithm SHA256_RSA4096 \
-            --key "$KEY_FILE"
-
-          echo "--> Both boot images processed and signed successfully."
+          echo "--> Unsigned boot.img processed successfully."
           cd "${{ github.workspace }}"
 
+      # ---
+      # STEP MODIFIED: Removed the "resize2fs" command
+      # ---
       - name: Process socko.img
         run: |
           echo "[INFO]: Processing socko.img..."
@@ -449,9 +374,7 @@ jobs:
             exit 1
           fi
           
-          # Copy stock image to final dir to modify it in-place
           cp "${{ github.workspace }}/socko.img" "${{ github.workspace }}/final_images/socko.img"
-          
           export SOCKO_IMG_PATH="${{ github.workspace }}/final_images/socko.img"
           export MOUNT_POINT="${{ github.workspace }}/socko_mount"
           
@@ -462,7 +385,6 @@ jobs:
 
           echo "--> Preparing to replace kernel modules..."
           
-          # Destination is the mount point root.
           export MODULE_DEST_PATH="$MOUNT_POINT"
           export MODULE_SOURCE_PATH="${{ github.workspace }}/modules_out/lib/modules/${{ env.KERNEL_VERSION }}/extra"
 
@@ -477,7 +399,6 @@ jobs:
           sudo find "$MODULE_DEST_PATH" -maxdepth 1 -name "*.ko" -delete
           
           echo "--> Copying new .ko files from $MODULE_SOURCE_PATH..."
-          # Copy all .ko files directly into the root
           sudo cp "$MODULE_SOURCE_PATH"/*.ko "$MODULE_DEST_PATH/"
           
           echo "--> New module list in socko.img root:"
@@ -486,35 +407,31 @@ jobs:
           echo "--> Unmounting socko.img..."
           sudo umount "$MOUNT_POINT"
           
-          echo "--> Running e2fsck and resize2fs..."
-          sudo e2fsck -f -y "$SOCKO_IMG_PATH" || echo "e2fsck found and fixed errors."
-          sudo resize2fs -M "$SOCKO_IMG_PATH"
+          echo "--> Running e2fsck..."
+          # Run e2fsck to ensure filesystem is clean
+          sudo e2fsck -f -y "$SOCKO_IMG_PATH" || true
+          
+          # Removed the resize2fs command to keep original image size
           
           echo "--> socko.img processed successfully."
-
-      # -----------------------------------------------------------------
-      # FINAL UPLOAD STEP
-      # -----------------------------------------------------------------
 
       - name: Check Final Image Sizes
         run: |
           echo "Contents of final_images directory:"
           ls -lR ${{ github.workspace }}/final_images/
-          
+
       - name: Upload Final Images to Telegram
-        if: success() # Only run if the build was successful
+        if: success()
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           message: |
-            ✅ Kernel build successful!
+            ✅ Kernel build successful! (Unsigned)
             
             Defconfig: ${{ inputs.defconfig }}
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             
             Here are your new images:
-          
-          # This will find and upload all files in the final_images directory
-          # (boot.img, boot-git.img, and socko.img)
+          # This will upload boot.img and socko.img
           document: ${{ github.workspace }}/final_images/*
