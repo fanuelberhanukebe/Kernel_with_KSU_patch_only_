@@ -75,9 +75,11 @@ jobs:
           sudo apt-get install -y --fix-missing \
             git wget bc device-tree-compiler lz4 xz-utils zlib1g-dev zip make gcc g++ \
             python3 python-is-python3 libncurses-dev flex bison gperf libssl-dev \
-            libelf-dev kmod pahole zstd libyaml-dev jq \
+            libelf-dev kmod pahole zstd libyaml-dev jq cpio\
             python3-pip e2fsprogs # Added pip and e2fsprogs
-          sudo pip3 install avb # Install avbtool
+          
+          
+          sudo pip3 install avbtool # Install avbtool
 
       - name: Cache toolchains
         uses: actions/cache@v4
